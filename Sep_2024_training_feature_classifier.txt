@@ -1,0 +1,492 @@
+###September/2024###
+###analysis of 16S sequencing data from vitamins experiment on C leptoporus - training of feature classifier required for assigning taxonomy###
+###primer pair used for 16S sequencing -341F/805R - amplification of V3-V4 region###
+###Author: Borna Branimir Vukovic###
+
+## a feature classifier is a qiime2 tool that assigns taxonomy to ASVs obtained by denoising ##
+## in order to be able to assign the correct taxonomy, a classifier first needs to be trained on reference sequences from a specific database, and for a more accurate classification it needs to be trained on only the region of the target sequences that was sequenced (determined by the primer pair) ##
+## General classifier training tutorial: https://docs.qiime2.org/2024.5/tutorials/feature-classifier/ ##
+## the SILVA database was chosen beacuse it is regularly updated, manually curated and contains a large number of sequence data (more info: https://www.arb-silva.de/) ##
+## the latest SILVA release is 138.2 - https://www.arb-silva.de/documentation/release-1382/ ##
+## the version used for training the taxonomic classifier is the curated non-redunant SSU (small subunit) Ref NR99 version, recommended by SILVA (based on the Ref dataset with a 99% criterion applied to remove redundant sequences) because it reduces computing power required for loading the database while still retaining representative data for taxonomic identification ##
+## more information on the SSU Ref NR99: https://www.arb-silva.de/projects/ssu-ref-nr/
+## in order to prepare the raw data from the SILVA database, they need to be properly formatted for use in qiime2 using the RESCRIPt plugin ##
+## RESCRIPt tutorial: https://forum.qiime2.org/t/processing-filtering-and-evaluating-the-silva-database-and-other-reference-sequence-data-with-rescript/15494 ##
+
+#activating the qiime2 environment - always at the beginning of analysis
+conda activate qiime2-amplicon-2024.5
+
+#making a directory that will contain all files for analysis
+cd 16s-analysis-vitamins
+mkdir silva-138.2-taxonomic-classifier-training
+cd silva-138.2-taxonomic-classifier-training
+
+#the following files need to be downloaded from the SILVA 138.2 release website (https://www.arb-silva.de/no_cache/download/archive/current/Exports/):
+#the sequence file - SILVA_138.2_SSURef_NR99_tax_silva_trunc.fasta.gz (sequences are non-redundant, unaligned and truncated - all nucleotides that have not been aligned were removed from the sequence)
+#the taxonomy files:
+ # tax_slv_ssu_138.2.txt.gz - taxonomy rank file, maps the taxonomic rank and taxonomy to the taxID
+ # taxmap_slv_ssu_ref_nr_138.2.txt.gz - taxonomy map file, maps the sequence accessions to the organism name and taxonomy IDs
+ # tax_slv_ssu_138.2.tre.gz - taxonomy tree file, contains the hierarchical relationship of the taxonomy IDs in tree form
+#manually copy the files to the corresponding directory
+
+#unzip the files
+gunzip tax_slv_ssu_138.2.txt.gz
+gunzip taxmap_slv_ssu_ref_nr_138.2.txt.gz
+gunzip tax_slv_ssu_138.2.tre.gz
+gunzip SILVA_138.2_SSURef_NR99_tax_silva_trunc.fasta.gz
+
+#importing the files into qiime2 compatible qza format
+qiime tools import \
+    --type 'FeatureData[SILVATaxonomy]' \
+    --input-path tax_slv_ssu_138.2.txt \
+    --output-path taxranks-silva-138.2-ssu-nr99.qza 
+
+qiime tools import \
+    --type 'FeatureData[SILVATaxidMap]' \
+    --input-path taxmap_slv_ssu_ref_nr_138.2.txt \
+    --output-path taxmap-silva-138.2-ssu-nr99.qza 
+
+qiime tools import \
+    --type 'Phylogeny[Rooted]' \
+    --input-path tax_slv_ssu_138.2.tre \
+    --output-path taxtree-silva-138.2-nr99.qza 
+
+qiime tools import \
+    --type 'FeatureData[RNASequence]' \
+    --input-path SILVA_138.2_SSURef_NR99_tax_silva_trunc.fasta \
+    --output-path silva-138.2-ssu-nr99-rna-seqs.qza
+
+#since the data in the SILVA database is in the form of RNA sequences, they need to be converted to DNA
+qiime rescript reverse-transcribe \
+    --i-rna-sequences silva-138.2-ssu-nr99-rna-seqs.qza \
+    --o-dna-sequences silva-138.2-ssu-nr99-seqs.qza
+
+#parse-silva-taxonomy is used to assign taxonomic rank and lineage information from SILVA - preparation of SILVA taxonomy
+#Silva species taxonomy is unreliable so it is not included here (more details in the RESCRIPt tutorial)
+#default taxonomic ranks are: 'domain', 'phylum', 'class', 'order', 'family', 'genus'
+#p-no-rank-propagation is included so to not propagate an upper level taxonomic rank to a lower one in case a lower one has no associated taxonomy
+qiime rescript parse-silva-taxonomy \
+    --i-taxonomy-tree taxtree-silva-138.2-nr99.qza \
+    --i-taxonomy-map taxmap-silva-138.2-ssu-nr99.qza \
+    --i-taxonomy-ranks taxranks-silva-138.2-ssu-nr99.qza \
+    --p-no-rank-propagation \
+    --o-taxonomy silva-138.2-ssu-nr99-tax.qza
+
+#culling (removing) low quality sequences that contain 5 or more ambiguous bases (IUPAC compliant ambiguity bases) and any homopolymers that are 8 or more bases in length - default parameters
+qiime rescript cull-seqs \
+    --i-sequences silva-138.2-ssu-nr99-seqs.qza \
+    --o-clean-sequences silva-138.2-ssu-nr99-seqs-cleaned.qza
+
+#dereplicating reference sequences and taxonomy - removing redundant sequences (those that have identical full-length sequences with either identical or different taxonomies)
+#p-mode 'uniq' means that all sequences with a unique taxonomy are retained, even if they have the same sequence (this is the default mode)
+#default taxonomic ranks: 'domain', 'phylum', 'class', 'order', 'family', 'genus', 'species'
+qiime rescript dereplicate \
+    --i-sequences silva-138.2-ssu-nr99-seqs-cleaned.qza  \
+    --i-taxa silva-138.2-ssu-nr99-tax.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences silva-138.2-ssu-nr99-seqs-derep-uniq.qza \
+    --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-derep-uniq.qza \
+    --verbose
+
+#visualizing the obtained seqeunces after the culling and dereplication steps (large file!)
+qiime feature-table tabulate-seqs \
+  --i-data silva-138.2-ssu-nr99-seqs-derep-uniq.qza \
+  --o-visualization silva-138.2-ssu-nr99-seqs-derep-uniq.qzv
+
+	#q2-clawback is used to assemble taxonomic weights (if there are two identical sequences with a different taxonomy in a database, clawback decides which taxonomy should be assigned based on the environment where that sequence came from)
+	pip install redbiom
+	pip install q2-clawback
+
+	#checking all the available environments (habitat types) available to decide whether any is applicable to our data - there is none (environment of our sequences - haptopyhte/coccolithophore culture in sterilised seawater medium)
+	#clawback is NOT USED with this dataset
+	qiime clawback summarize-Qiita-metadata-category-and-contexts \
+  	  --p-category sample_type \
+  	  --o-visualization available_qiita.qzv
+
+	qiime clawback summarize-Qiita-metadata-category-and-contexts \
+  	  --p-category empo_3 \
+  	  --o-visualization available_empo_3.qzv \
+
+##the next step is to make a classifier specific to our region of interest (V3-V4, limited by 341f-805r primer pair)
+##to do that, it is first required to extract the amplicon region from the reference database, by specifying the primers used, but this can miss certain V3-V4 reads that have had their primer(s) removed prior to import to the database - thus the extracted read dataset is used as a query against the full reference database again, to extract those reads that belong to V3-V4 but do not contain primers (based on sequence similarity with the extracted sequences containing the primers)
+##tutorial and more info: https://forum.qiime2.org/t/using-rescripts-extract-seq-segments-to-extract-reference-sequences-without-pcr-primer-pairs/23618
+
+#extracting the amplicon region from the SILVA ref database, with the 341f (p-f-primer) and 805r (p-r-primer) as queries
+#p-min-length and p-max-length set the boundaries for extracted sequence lengths, accounting for length variability of the V3-V4 region (it has 2 peaks, at 440 bp and 460 bp)
+#p-read-orientation is set to 'forward' beacuse the SILVA database is curated to be in the fwd orientation
+qiime feature-classifier extract-reads \
+    --i-sequences silva-138.2-ssu-nr99-seqs-derep-uniq.qza \
+    --p-f-primer CCTACGGGNGGCWGCAG \
+    --p-r-primer GACTACHVGGGTATCTAATCC \
+    --p-min-length 350 \
+    --p-max-length 500 \
+    --p-read-orientation 'forward' \
+    --o-reads silva-138.2-ssu-nr99-seqs-341f-805r.qza \
+    --verbose
+
+#culling the obtained sequences, with the num-degenerates parameter set to 1 (this removes sequences with 1 degenerate base)  
+qiime rescript cull-seqs \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r.qza \
+    --p-num-degenerates 1 \
+    --o-clean-sequences silva-138.2-ssu-nr99-seqs-341f-805r-cleaned.qza
+
+#dereplicating the obtained sequences
+qiime rescript dereplicate \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-cleaned.qza \
+    --i-taxa silva-138.2-ssu-nr99-tax-derep-uniq.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences silva-138.2-ssu-nr99-seqs-341f-805r-derep-uniq.qza \
+    --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-341f-805r-derep-uniq.qza 
+
+#visualizing the obtained sequences, to check how many sequences were left in the reference pool after the extracting step
+#from the initial number of full-size dereplicated sequences - 436927, the extraction based on primers reduced the number to 287409
+qiime feature-table tabulate-seqs \
+  --i-data silva-138.2-ssu-nr99-seqs-341f-805r-derep-uniq.qza \
+  --o-visualization silva-138.2-ssu-nr99-seqs-341f-805r-derep-uniq.qzv 
+
+##in order to expand the reference sequence pool, the extracted amplicon sequence reference reads are queried against the initial reference sequences, in multiple iterations, each time increasing the percent identity at which the sequence clustering is performed
+#1st iteration of extracting query sequence segments from the full sequence database - p-perc-identity set at 0.7 (70%)
+qiime rescript extract-seq-segments \
+    --i-input-sequences silva-138.2-ssu-nr99-seqs-derep-uniq.qza \
+    --i-reference-segment-sequences silva-138.2-ssu-nr99-seqs-341f-805r-derep-uniq.qza \
+    --p-perc-identity 0.7 \
+    --o-extracted-sequence-segments silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01.qza \
+    --o-unmatched-sequences silva-138.2-ssu-nr99-seqs-341f-805r-unmatched-sequences-01.qza \
+    --verbose
+
+#culling and dereplication of the obtained sequences
+qiime rescript cull-seqs \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01.qza \
+    --p-num-degenerates 1 \
+    --o-clean-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-cleaned.qza
+
+qiime rescript dereplicate \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-cleaned.qza \
+    --i-taxa silva-138.2-ssu-nr99-tax-derep-uniq.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-derep.qza \
+    --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-01-derep.qza
+
+#visualizing the obtained sequences
+#from the initial number of extracted sequences - 287409, after the first iteration the number is 322924
+qiime feature-table tabulate-seqs \
+  --i-data silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-derep.qza \
+  --o-visualization silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-derep.qzv
+
+#2nd iteration of extracting query sequence segments from the full sequence database - p-perc-identity set at 0.95 (95%)
+qiime rescript extract-seq-segments \
+    --i-input-sequences silva-138.2-ssu-nr99-seqs-derep-uniq.qza \
+    --i-reference-segment-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-derep.qza \
+    --p-perc-identity 0.95 \
+    --p-threads 8 \
+    --o-extracted-sequence-segments silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02.qza \
+    --o-unmatched-sequences silva-138.2-ssu-nr99-seqs-341f-805r-unmatched-sequences-02.qza \
+    --verbose
+
+#culling and dereplication of the obtained sequences
+qiime rescript cull-seqs \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02.qza \
+    --p-num-degenerates 1 \
+    --o-clean-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-cleaned.qza
+
+qiime rescript dereplicate \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-cleaned.qza \
+    --i-taxa silva-138.2-ssu-nr99-tax-derep-uniq.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep.qza \
+    --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep.qza 
+
+#visualizing the obtained sequences
+#after the first iteration of the extraction, the number of sequences was 322924 (size range 113-669 bp), and after the second iteration there is 326829 (size range 113-669 bp) - ~75% of the initial number of reference sequences, which is acceptable
+qiime feature-table tabulate-seqs \
+  --i-data silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep.qza \
+  --o-visualization silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep.qzv
+
+#constructing the taxonomic classifier, using the produced reference sequence and reference taxonomy files
+qiime feature-classifier fit-classifier-naive-bayes \
+    --i-reference-reads silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep.qza \
+    --i-reference-taxonomy silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep.qza \
+    --o-classifier silva-classifier-v3v4.qza \
+    --verbose
+
+#evaluation of the classifier (database and taxonomy)
+qiime rescript evaluate-fit-classifier \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep.qza \
+    --i-taxonomy silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep.qza  \
+    --o-classifier evaluated-silva-classifier-v3v4.qza \
+    --o-observed-taxonomy silva-138.2-ssu-nr99-tax-341f-805r-predicted-taxonomy.qza \
+    --o-evaluation silva-classifier-evaluation.qzv \
+    --verbose
+
+qiime rescript evaluate-taxonomy \
+  --i-taxonomies silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep.qza silva-138.2-ssu-nr99-tax-341f-805r-predicted-taxonomy.qza \
+  --p-labels silva-taxonomy-segments silva-predicted taxonomy \
+  --o-taxonomy-stats silva-taxonomy-evaluation.qzv
+
+
+###
+##constructing a new classifier based on SILVA 138.2, but with species-level annotation
+##the construction starts at the parse-silva taxonomy, where p-include-species-labels is added, although it may be unreliable
+qiime rescript parse-silva-taxonomy \
+    --i-taxonomy-tree taxtree-silva-138.2-nr99.qza \
+    --i-taxonomy-map taxmap-silva-138.2-ssu-nr99.qza \
+    --i-taxonomy-ranks taxranks-silva-138.2-ssu-nr99.qza \
+    --p-no-rank-propagation \
+    --p-include-species-labels \
+    --o-taxonomy silva-138.2-ssu-nr99-tax-sp.qza
+
+qiime rescript dereplicate \
+    --i-sequences silva-138.2-ssu-nr99-seqs-cleaned.qza  \
+    --i-taxa silva-138.2-ssu-nr99-tax-sp.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences silva-138.2-ssu-nr99-seqs-derep-uniq-sp.qza \
+    --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-derep-uniq-sp.qza \
+    --verbose
+
+#number of sequences - 438106 (size range 900-3420)
+qiime feature-table tabulate-seqs \
+  --i-data silva-138.2-ssu-nr99-seqs-derep-uniq-sp.qza \
+  --o-visualization silva-138.2-ssu-nr99-seqs-derep-uniq-sp.qzv
+
+qiime feature-classifier extract-reads \
+    --i-sequences silva-138.2-ssu-nr99-seqs-derep-uniq-sp.qza \
+    --p-f-primer CCTACGGGNGGCWGCAG \
+    --p-r-primer GACTACHVGGGTATCTAATCC \
+    --p-min-length 350 \
+    --p-max-length 500 \
+    --p-read-orientation 'forward' \
+    --o-reads silva-138.2-ssu-nr99-seqs-341f-805r-sp.qza \
+    --verbose
+
+qiime rescript cull-seqs \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-sp.qza \
+    --p-num-degenerates 1 \
+    --o-clean-sequences silva-138.2-ssu-nr99-seqs-341f-805r-sp-cleaned.qza
+
+qiime rescript dereplicate \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-sp-cleaned.qza \
+    --i-taxa silva-138.2-ssu-nr99-tax-derep-uniq-sp.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences silva-138.2-ssu-nr99-seqs-341f-805r-derep-uniq-sp.qza \
+    --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-341f-805r-derep-uniq-sp.qza 
+
+#from the initial number of full-size dereplicated sequences - 438106, the extraction based on primers reduced the number to 304273
+qiime feature-table tabulate-seqs \
+  --i-data silva-138.2-ssu-nr99-seqs-341f-805r-derep-uniq-sp.qza \
+  --o-visualization silva-138.2-ssu-nr99-seqs-341f-805r-derep-uniq-sp.qzv 
+
+#1st iteration of extracting query sequence segments from the full sequence database - p-perc-identity set at 0.7 (70%)
+qiime rescript extract-seq-segments \
+    --i-input-sequences silva-138.2-ssu-nr99-seqs-derep-uniq-sp.qza \
+    --i-reference-segment-sequences silva-138.2-ssu-nr99-seqs-341f-805r-derep-uniq-sp.qza \
+    --p-perc-identity 0.7 \
+    --p-threads 8 \
+    --o-extracted-sequence-segments silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-sp-01.qza \
+    --o-unmatched-sequences silva-138.2-ssu-nr99-seqs-341f-805r-unmatched-sequences-sp-01.qza \
+    --verbose
+
+qiime rescript cull-seqs \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-sp-01.qza \
+    --p-num-degenerates 1 \
+    --o-clean-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-sp-01-cleaned.qza
+
+qiime rescript dereplicate \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-sp-01-cleaned.qza \
+    --i-taxa silva-138.2-ssu-nr99-tax-derep-uniq-sp.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-derep-sp.qza \
+    --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-01-derep-sp.qza
+
+#from the initial number of extracted sequences - 304273, after the first iteration the number is 338744 (size range 113-669)
+qiime feature-table tabulate-seqs \
+  --i-data silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-derep-sp.qza \
+  --o-visualization silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-derep-sp.qzv
+
+#2nd iteration of extracting query sequence segments from the full sequence database - p-perc-identity set at 0.95 (95%)
+qiime rescript extract-seq-segments \
+    --i-input-sequences silva-138.2-ssu-nr99-seqs-derep-uniq-sp.qza \
+    --i-reference-segment-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-01-derep-sp.qza \
+    --p-perc-identity 0.95 \
+    --p-threads 8 \
+    --o-extracted-sequence-segments silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-sp-02.qza \
+    --o-unmatched-sequences silva-138.2-ssu-nr99-seqs-341f-805r-unmatched-sequences-sp-02.qza \
+    --verbose
+
+qiime rescript cull-seqs \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-sp-02.qza \
+    --p-num-degenerates 1 \
+    --o-clean-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-sp-02-cleaned.qza
+
+qiime rescript dereplicate \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-sp-02-cleaned.qza \
+    --i-taxa silva-138.2-ssu-nr99-tax-derep-uniq-sp.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep-sp.qza \
+    --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep-sp.qza 
+
+#after the first iteration of the extraction, the number of sequences was 338774 (size range 113-669 bp), and after the second iteration there is 343295 (size range 113-669 bp) - ~78% of the initial number of reference sequences, which is acceptable
+qiime feature-table tabulate-seqs \
+  --i-data silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep-sp.qza \
+  --o-visualization silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep-sp.qzv
+
+qiime feature-classifier fit-classifier-naive-bayes \
+    --i-reference-reads silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep-sp.qza \
+    --i-reference-taxonomy silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep-sp.qza \
+    --o-classifier silva-classifier-v3v4-species-level.qza \
+    --verbose
+
+#NOT ENOUGH MEMORY FOR SILVA SPECIES LEVEL CLASSIFIER TRAINING - try with greengenes
+
+qiime rescript evaluate-fit-classifier \
+    --i-sequences silva-138.2-ssu-nr99-seqs-341f-805r-extracted-seq-segments-02-derep-sp.qza \
+    --i-taxonomy silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep-sp.qza \
+    --o-classifier silva-classifier-v3v4-species-level.qza \
+    --o-observed-taxonomy silva-138.2-ssu-nr99-tax-341f-805r-predicted-taxonomy-sp-level.qza \
+    --o-evaluation silva-sp-level-classifier-evaluation.qzv \
+    --verbose
+
+qiime rescript evaluate-taxonomy \
+  --i-taxonomies silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep-sp.qza silva-138.2-ssu-nr99-tax-341f-805r-predicted-taxonomy-sp-level.qza \
+  --p-labels silva-taxonomy-segments silva-predicted taxonomy \
+  --o-taxonomy-stats silva-taxonomy-sp-level-evaluation.qzv
+
+
+	###	GREENGENES CLASSIFIER	###
+##since the previously trained SILVA classifier is unreliable at the species level, and training of SILVA classifier to include species annotation has a high memory requirement, another classifier is trained based on the Greengenes database
+##Greengenes2 is an updated version of the Greengeenes database that is based on the whole genome Web of Life phylogeny which is updated with full length 16S records from GTDB, the Living Tree Project, SILVA, and Karst et al Nature Methods 2021
+##more info and tutorial on usage in qiime2: https://forum.qiime2.org/t/introducing-greengenes2-2022-10/25291
+##while greengenes2 can be used as a standalone qiime2 plugin, this classifier is trained the same way as the silva one above, as this is still a better way for our specific dataset - V3-V4 amplicons
+##the latest Greenegenes2 version is used for classifier training - 2022.10  
+
+#making a directory that will contain all files for analysis
+cd 16s-analysis-vitamins
+mkdir greengenes2-2022.10-taxonomic-classifier-training
+cd greengenes2-2022.10-taxonomic-classifier-training
+
+#the reference reads and taxonomy are downloaded from the Greengenes2 website (https://ftp.microbio.me/greengenes_release/current/), as already prepared qza files and manually copied to the directory
+#2022.10.backbone.full-length.fna.qza - all of the unique full length 16S rRNA sequences in Greengenes2
+#2022.10.backbone.tax.qza - the corresponding taxonomy of the full length 16s rRNA sequences in Greengenes2
+
+#visualizing the sequence counts - the overall number of sequences: 331269 (size range 416-4563 bp)
+qiime feature-table tabulate-seqs \
+  --i-data 2022.10.backbone.full-length.fna.qza \
+  --o-visualization 2022.10.backbone.full-length.fna.qzv
+
+#extracting the amplicon region from the Greengenes2 ref database, with the 341f (p-f-primer) and 805r (p-r-primer) as queries
+qiime feature-classifier extract-reads \
+    --i-sequences 2022.10.backbone.full-length.fna.qza \
+    --p-f-primer CCTACGGGNGGCWGCAG \
+    --p-r-primer GACTACHVGGGTATCTAATCC \
+    --p-min-length 299 \
+    --p-max-length 500 \
+    --p-read-orientation both \
+    --o-reads 2022.10.backbone.v3v4.fna.qza \
+    --verbose
+
+#from the initial number of full-length sequences - 331269, the primer-based extraction reduced the number to 328791 (size range 299-500 bp) - 99% of the initial number
+qiime feature-table tabulate-seqs \
+  --i-data 2022.10.backbone.v3v4.fna.qza \
+  --o-visualization 2022.10.backbone.v3v4.fna.qzv
+
+#culling and dereplication of the v3-v4 region sequence segments, same as for silva data (to potentially reduce the memory requirements for classifier training)
+qiime rescript cull-seqs \
+    --i-sequences 2022.10.backbone.v3v4.fna.qza \
+    --o-clean-sequences 2022.10.backbone.v3v4-cleaned.qza
+
+qiime rescript dereplicate \
+    --i-sequences 2022.10.backbone.v3v4-cleaned.qza  \
+    --i-taxa 2022.10.backbone.tax.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences 2022.10.backbone.v3v4-derep-uniq.qza \
+    --o-dereplicated-taxa 2022.10.backbone.tax.v3v4-derep-uniq.qza \
+    --verbose
+
+#visualizing the obtained seqeunces after the culling and dereplication steps - the overall number of sequences: 145333	(size range 299-498 bp)
+qiime feature-table tabulate-seqs \
+  --i-data 2022.10.backbone.v3v4-derep-uniq.qza \
+  --o-visualization 2022.10.backbone.v3v4-derep-uniq.qzv
+
+#1st iteration of extracting query sequence segments from the full sequence database - p-perc-identity set at 0.7 (70%)
+qiime rescript extract-seq-segments \
+    --i-input-sequences 2022.10.backbone.full-length.fna.qza \
+    --i-reference-segment-sequences 2022.10.backbone.v3v4-derep-uniq.qza \
+    --p-perc-identity 0.7 \
+    --p-threads 8 \
+    --o-extracted-sequence-segments 2022.10.backbone.v3v4-extracted-seq-segments-01.qza \
+    --o-unmatched-sequences 2022.10.backbone.v3v4-unmatched-sequences-01.qza \
+    --verbose
+
+qiime rescript cull-seqs \
+    --i-sequences 2022.10.backbone.v3v4-extracted-seq-segments-01.qza \
+    --p-num-degenerates 1 \
+    --o-clean-sequences 2022.10.backbone.v3v4-extracted-seq-segments-01-cleaned.qza
+
+qiime rescript dereplicate \
+    --i-sequences 2022.10.backbone.v3v4-extracted-seq-segments-01-cleaned.qza \
+    --i-taxa 2022.10.backbone.tax.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences 2022.10.backbone.v3v4-extracted-seq-segments-01-derep.qza \
+    --o-dereplicated-taxa 2022.10.backbone.tax.v3v4-extracted-seq-segments-01-derep.qza
+
+#from the initial number of extracted sequences - 145333, after the first iteration the number is 145520 (size range 55-619 bp)
+qiime feature-table tabulate-seqs \
+  --i-data 2022.10.backbone.v3v4-extracted-seq-segments-01-derep.qza \
+  --o-visualization 2022.10.backbone.v3v4-extracted-seq-segments-01-derep.qzv
+
+##2nd iteration of extracting query sequence segments from the full sequence database - p-perc-identity set at 0.9 (90%), and minimum sequence length to 100 bp
+qiime rescript extract-seq-segments \
+    --i-input-sequences 2022.10.backbone.full-length.fna.qza \
+    --i-reference-segment-sequences 2022.10.backbone.v3v4-extracted-seq-segments-01-derep.qza \
+    --p-perc-identity 0.9 \
+    --p-min-seq-len 100 \
+    --p-threads 8 \
+    --o-extracted-sequence-segments 2022.10.backbone.v3v4-extracted-seq-segments-02.qza \
+    --o-unmatched-sequences 2022.10.backbone.v3v4-unmatched-sequences-02.qza \
+    --verbose
+
+qiime rescript cull-seqs \
+    --i-sequences 2022.10.backbone.v3v4-extracted-seq-segments-02.qza \
+    --p-num-degenerates 1 \
+    --o-clean-sequences 2022.10.backbone.v3v4-extracted-seq-segments-02-cleaned.qza
+
+qiime rescript dereplicate \
+    --i-sequences 2022.10.backbone.v3v4-extracted-seq-segments-02-cleaned.qza \
+    --i-taxa 2022.10.backbone.tax.qza \
+    --p-mode 'uniq' \
+    --o-dereplicated-sequences 2022.10.backbone.v3v4-extracted-seq-segments-02-derep.qza \
+    --o-dereplicated-taxa 2022.10.backbone.tax.v3v4-extracted-seq-segments-02-derep.qza
+
+#after the first iteration the number of extracted sequences was 145520, and after the second iteration the number is 145775 (size range 55-619 bp) - 44% of the initial number
+qiime feature-table tabulate-seqs \
+  --i-data 2022.10.backbone.v3v4-extracted-seq-segments-02-derep.qza \
+  --o-visualization 2022.10.backbone.v3v4-extracted-seq-segments-02-derep.qzv
+
+qiime rescript evaluate-fit-classifier \
+    --i-sequences 2022.10.backbone.v3v4-extracted-seq-segments-02-derep.qza \
+    --i-taxonomy 2022.10.backbone.tax.v3v4-extracted-seq-segments-02-derep.qza \
+    --p-n-jobs 0 \
+    --o-classifier greengenes2-classifier-v3v4.qza \
+    --o-observed-taxonomy greengenes2-predicted-taxonomy.qza \
+    --o-evaluation greengenes2-classifier-evaluation.qzv \
+    --verbose
+#NOT ENOUGH MEMORY TO EXECUTE - TRY WITH q2-greengenes2 plugin that classifies the sequences by comparing them against the resources available in the Greengenes2 database	
+
+#installing the greengenes2 plugin
+pip install q2-greengenes2
+qiime dev refresh-cache
+qiime greengenes2 --help
+
+#after the silva species level classifier has been trained on the Padobran cluster, its taxonomic labels are evaluated before it is used
+cd silva-138.2-taxonomic-classifier-training
+qiime rescript evaluate-taxonomy \
+  --i-taxonomies silva-138.2-ssu-nr99-tax-341f-805r-extracted-seq-segments-02-derep-sp.qza silva-138.2-ssu-nr99-tax-341f-805r-predicted-taxonomy-sp-level.qza \
+  --p-labels silva-taxonomy silva-predicted-taxonomy \
+  --o-taxonomy-stats silva-sp-level-taxonomy-evaluation.qzv			
+
+#same taxonomic evaluation of the greengenes species level classifier trained on the Padobran cluster
+cd greengenes2-2022.10-taxonomic-classifier-training
+qiime rescript evaluate-taxonomy \
+  --i-taxonomies 2022.10.backbone.tax.qza greengenes2-predicted-taxonomy.qza \
+  --p-labels greengenes-taxonomy greengenes-predicted-taxonomy \
+  --o-taxonomy-stats gg2-taxonomy-evaluation.qzv	
+
