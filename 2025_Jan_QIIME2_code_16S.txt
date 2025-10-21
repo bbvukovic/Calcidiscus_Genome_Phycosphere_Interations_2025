@@ -1,0 +1,621 @@
+###January/March/2025###
+###analysis of 16S sequencing data from axenic cultures, culture collection and vitamin treatments of C leptoporus###
+###primer pair used for 16S sequencing - 341F/805R - amplification of V3-V4 region###
+###Author: Borna Branimir Vukovic###
+
+#activating the qiime2 environment - always at the beginning of analysis
+conda activate qiime2-amplicon-2024.5
+
+#to check versions of qiime and all the packages: qiime info 
+
+#making a directory that will contain all files for analysis
+#in the directory folder on computer, manually add the raw read files
+mkdir 16s-new-exp
+cd 16s-new-exp
+
+#importing raw reads into a qiime2 readable qza format
+#tutorial: https://docs.qiime2.org/2024.5/tutorials/importing/
+#maunally create manifest file (tab separated file) with the filepath to each read -> raw-reads-import-manifest.tsv
+#reads obtained from Macrogen use a Phred quality score offset of 33, and the sequences are paired-end
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path raw-reads-import-manifest.tsv \
+  --output-path paired-end-demux.qza \
+  --input-format PairedEndFastqManifestPhred33V2
+
+#create visualization to summarize number of reads per sample and to get quality plot
+#viewing qzv files: https://view.qiime2.org/
+qiime demux summarize \
+  --i-data paired-end-demux.qza \
+  --o-visualization paired-end-16s-demux.qzv
+
+##dada2 denoising - pipeline for detecting and correcting Illumina amplicon sequence data - includes trimming of low quality sequence segments, removing low quality reads and chimeric sequences, merging paired-end reads and generating amplicon sequence variants (ASVs)
+#the sequence truncating length is based on the interactive quality plot in the paired-end-16s-demux.qzv file
+
+#1st denoising trial - based on the interactive quality plot, the 5' ends of fwd sequences are trimmed at position 5 (they are of lower quality), the 3' ends of fwd reads at 278, and 3' ends of rev reads at 191 (where the bottom of the quality score histogram - 25th percentile, drops below 25)
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs paired-end-demux.qza \
+  --p-trim-left-f 5 \
+  --p-trim-left-r 5 \
+  --p-trunc-len-f 278 \
+  --p-trunc-len-r 191 \
+  --o-representative-sequences test1-rep-seqs-dada2.qza \
+  --o-table test1-table-dada2.qza \
+  --o-denoising-stats test1-stats-dada2.qza \
+  --verbose
+
+#visualizing denoising output files
+#in this step it is required to have a metadata table containing information about the samples, created manually
+#metadata tables for qiime2 analyses can be created in Excel and validated with the Google Sheets add-on Keemei: https://keemei.qiime2.org/
+qiime metadata tabulate \
+  --m-input-file test1-stats-dada2.qza \
+  --o-visualization test1-stats-dada2.qzv
+qiime feature-table summarize \
+  --i-table test1-table-dada2.qza \
+  --o-visualization test1-table-dada2.qzv \
+  --m-sample-metadata-file metadata.tsv
+qiime feature-table tabulate-seqs \
+  --i-data test1-rep-seqs-dada2.qza \
+  --o-visualization test1-rep-seqs-dada2.qzv
+
+
+##cutadapt primer trimming
+#removing primers and all subsequent (in case of 3' end primers) or preceeding (in case of 5' end primers) bases from the sequences using the cutadapt tool - this removes the adapters as well since they flank the primer sequences 
+#adapter-f - reverse complement of 805r primer
+#front-f - 341f primer 
+#adapter-r - reverse complement of 341f primer
+#front-r - 805r primer
+qiime cutadapt trim-paired \
+  --i-demultiplexed-sequences paired-end-demux.qza \
+  --p-adapter-f GGATTAGATACCCBDGTAGTC \
+  --p-front-f CCTACGGGNGGCWGCAG	\
+  --p-adapter-r CTGCWGCCNCCCGTAGG \
+  --p-front-r GACTACHVGGGTATCTAATCC \
+  --p-match-adapter-wildcards \
+  --p-match-read-wildcards \
+  --o-trimmed-sequences paired-end-demux-trimmed-16s.qza \
+  --verbose
+
+#making a visualization of the trimmed sequences, containing number of reads per sample and quality plot
+qiime demux summarize \
+  --i-data paired-end-demux-trimmed-16s.qza \
+  --o-visualization paired-end-demux-trimmed-16s.qzv
+
+##repeating cutadapt trimming - instead of using the qiime modification of cutadapt, the cutadapt algorithm (https://cutadapt.readthedocs.io/en/stable/) is used directly to get the info file, which is not possible in the qiime modification
+#the info file contains information on where the primer sequence was located, which part of the primer sequence was found, and what was left after trimming of the primer, BUT ONLY for fwd reads, so it needs to be done individually for fwd and rev reads
+cd raw-reads
+for f in *_1.fastq.gz; do
+    cutadapt -a GGATTAGATACCCBDGTAGTC -g CCTACGGGNGGCWGCAG --info-file cutadapt-info-fwd-reads.tsv -o trimmed-${f} ${f}
+done
+
+#obtaining the info file for reverse reads
+for f in *_2.fastq.gz; do
+    cutadapt -a CTGCWGCCNCCCGTAGG -g GACTACHVGGGTATCTAATCC --info-file cutadapt-info-rev-reads.tsv -o trimmed-${f} ${f}
+done
+
+#denoising of trimmed sequences - truncation length was decided based on the position where the bottom of the quality score histogram (25th percentile) drops consistently below 25
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs paired-end-demux-trimmed-16s.qza \
+  --p-trunc-len-f 261 \
+  --p-trunc-len-r 170 \
+  --o-representative-sequences rep-seqs-dada2-trimmed.qza \
+  --o-table table-dada2-trimmed.qza \
+  --o-denoising-stats stats-dada2-trimmed.qza \
+  --verbose
+
+#visualizing denoising output files
+qiime metadata tabulate \
+  --m-input-file stats-dada2-trimmed.qza \
+  --o-visualization stats-dada2-trimmed.qzv
+qiime feature-table summarize \
+  --i-table table-dada2-trimmed.qza \
+  --o-visualization table-dada2-trimmed.qzv \
+  --m-sample-metadata-file metadata.tsv
+qiime feature-table tabulate-seqs \
+  --i-data rep-seqs-dada2-trimmed.qza \
+  --o-visualization rep-seqs-dada2-trimmed.qzv
+
+##denoising of both trimmed and untrimmed sequences resulted in ~40-50% of sequences being lost during the first step (filtering), likely due to a low quality of reverse reads, so the next trial is with only forward reads
+
+#importing only fwd reads
+qiime tools import \
+  --type 'SampleData[SequencesWithQuality]' \
+  --input-path fwd-raw-reads-import-manifest.tsv \
+  --output-path single-end-demux.qza \
+  --input-format SingleEndFastqManifestPhred33V2
+
+#visualization of the imported reads
+qiime demux summarize \
+  --i-data single-end-demux.qza \
+  --o-visualization single-end-16s-demux.qzv
+
+#cutadapt trimming of primers on only forward reads
+qiime cutadapt trim-single \
+  --i-demultiplexed-sequences single-end-demux.qza \
+  --p-adapter GGATTAGATACCCBDGTAGTC \
+  --p-front CCTACGGGNGGCWGCAG \
+  --p-match-read-wildcards \
+  --p-match-adapter-wildcards \
+  --o-trimmed-sequences single-end-demux-trimmed-16s.qza \
+  --verbose
+
+#visualization of trimmed sequences
+qiime demux summarize \
+  --i-data single-end-demux-trimmed-16s.qza \
+  --o-visualization single-end-demux-trimmed-16s.qzv
+
+#denoising of single end trimmed forward reads, with the same cutoff value as before
+qiime dada2 denoise-single \
+  --i-demultiplexed-seqs single-end-demux-trimmed-16s.qza \
+  --p-trunc-len 261 \
+  --o-representative-sequences rep-seqs-dada2-single-end-trimmed.qza \
+  --o-table table-dada2-single-end-trimmed.qza \
+  --o-denoising-stats stats-dada2-single-end-trimmed.qza \
+  --verbose
+
+#visualizing denoising output files
+qiime metadata tabulate \
+  --m-input-file stats-dada2-single-end-trimmed.qza \
+  --o-visualization stats-dada2-single-end-trimmed.qzv
+qiime feature-table summarize \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --o-visualization table-dada2-single-end-trimmed.qzv \
+  --m-sample-metadata-file metadata.tsv
+qiime feature-table tabulate-seqs \
+  --i-data rep-seqs-dada2-single-end-trimmed.qza \
+  --o-visualization rep-seqs-dada2-single-end-trimmed.qzv
+
+##TAXONOMIC ANALYSIS
+
+	#assigning taxonomy to the obtained ASVs using a previously trained Silva species level classifier based on the V3-V4 region (primers 341f/805r)
+	#not enough memory - this step is done on the Padobran cluster
+	qiime feature-classifier classify-sklearn \
+  		--i-classifier silva-classifier-v3v4-species-level.qza \
+  		--i-reads rep-seqs-dada2-single-end-trimmed.qza \
+  		--o-classification taxonomy-16s-sp-level.qza \
+  		--verbose
+
+#creating a taxonomic table and barplots based on the assigned taxonomy
+qiime metadata tabulate \
+  --m-input-file taxonomy-16s-sp-level.qza \
+  --o-visualization taxonomy.qzv
+
+qiime taxa barplot \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --i-taxonomy taxonomy-16s-sp-level.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization taxa-bar-plots-16s.qzv
+
+#taxonomic annotation based on a Silva genus level classifier, previously trained on the V3-V4 region (primers 341f/805r), because it has been shown to better distinguish mitochondria
+qiime feature-classifier classify-sklearn \
+  --i-classifier silva-classifier-v3v4.qza \
+  --i-reads rep-seqs-dada2-single-end-trimmed.qza \
+  --o-classification taxonomy-16s-genus-level.qza \
+  --verbose
+
+qiime metadata tabulate \
+  --m-input-file taxonomy-16s-genus-level.qza \
+  --o-visualization taxonomy-genus-lv.qzv
+
+qiime taxa barplot \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --i-taxonomy taxonomy-16s-genus-level.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization taxa-bar-plots-16s-genus-lv.qzv
+
+#downstream anaylses will continue with species-level taxonomy
+
+#at the 1st taxonomic level, a small number of sequences was assigned as Eukaryotic or Unassigned, so these are removed from further analyses
+qiime taxa filter-table \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --i-taxonomy taxonomy-16s-sp-level.qza \
+  --p-exclude Eukaryota,Unassigned \
+  --o-filtered-table table-dada2-trimmed-no-euk-no-unassign.qza
+
+#visualizing the new feature table
+qiime feature-table summarize \
+  --i-table table-dada2-trimmed-no-euk-no-unassign.qza \
+  --o-visualization table-dada2-trimmed-no-euk-no-unassign.qzv \
+  --m-sample-metadata-file metadata.tsv
+
+#creating a new taxa bar plot without Eukaryotic and Unassigned sequences
+qiime taxa barplot \
+  --i-table table-dada2-trimmed-no-euk-no-unassign.qza \
+  --i-taxonomy taxonomy-16s-sp-level.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization taxa-bar-plots-16s-no-euk-no-unassign.qzv
+
+#preforming multiple sequence alignment on the ASVs generated by denoising (in the rep-seqs file) using the mafft program - this is required to compute phylogenetic diversity metrics
+#the fasttree program generates a phylogenetic tree from the masked alignment (masking is removing highly variable positions that are considered to add noise to the phylogenetic tree)
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences rep-seqs-dada2-single-end-trimmed.qza \
+  --o-alignment aligned-rep-seqs.qza \
+  --o-masked-alignment masked-aligned-rep-seqs.qza \
+  --o-tree unrooted-tree.qza \
+  --o-rooted-tree rooted-tree.qza
+
+##ALPHA and BETA DIVERSITY ANALYSIS
+
+#more details on alpha and beta diversity in the qiime2 tutorial (https://docs.qiime2.org/2024.5/tutorials/moving-pictures/)
+#prior to computing alpha and beta diversity metrics, alpha rarefaction (measure of alpha diversity as a function of sampling depth) is preformed because those metrics are computed at an equal sampling depth for all samples, therefore the samples are rarefied
+#p-max-depth is chosen based on the feature table obtained by denoising, as the 'interactive sample detail' tab shows how many sequences are retained at a certain sampling depth
+#the value of p-max-depth 23118 was chosen as it retains the highest number of sequences, while no samples are being excluded
+qiime diversity alpha-rarefaction \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --i-phylogeny rooted-tree.qza \
+  --p-max-depth 23118 \
+  --m-metadata-file metadata.tsv \
+  --o-visualization alpha-rarefaction.qzv
+
+#computing alpha and beta diversity metrics on the chosen sampling depth (the alpha rarefaction plot levels out at this depth for all samples, therefore the richness of the samples has been fully observed)
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --p-sampling-depth 23118 \
+  --m-metadata-file metadata.tsv \
+  --output-dir core-metrics-results
+
+
+#filtering the feature table with only vitamin treatment
+qiime feature-table filter-samples \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --m-metadata-file metadata.tsv \
+  --p-where "[Treatment]='Vitamins'" \
+  --o-filtered-table vitamins-only-filtered-table.qza
+
+#filtering the feature table with only axenic data
+qiime feature-table filter-samples \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --m-metadata-file metadata.tsv \
+  --p-where "[Treatment]='Axenisation'" \
+  --o-filtered-table axenic-only-filtered-table.qza
+
+#filtering the feature table with only collection data
+qiime feature-table filter-samples \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --m-metadata-file metadata.tsv \
+  --p-where "[Treatment]='Collection'" \
+  --o-filtered-table collection-only-filtered-table.qza
+
+#filtering out chloroplast, unassigned (on domain level) and eukaryotic sequences
+qiime taxa filter-table \
+  --i-table vitamins-only-filtered-table.qza \
+  --i-taxonomy taxonomy-16s-sp-level.qza \
+  --p-exclude Unassigned,Eukaryota,Chloroplast \
+  --o-filtered-table vitamins-only-filtered-table-no-chloro.qza
+
+#visualizing the new feature tables 
+
+#vitamin only
+qiime feature-table summarize \
+  --i-table vitamins-only-filtered-table.qza \
+  --o-visualization vitamins-only-filtered-table.qzv \
+  --m-sample-metadata-file metadata.tsv
+
+#axenic only
+qiime feature-table summarize \
+  --i-table axenic-only-filtered-table.qza \
+  --o-visualization axenic-only-filtered-table.qzv \
+  --m-sample-metadata-file metadata.tsv
+
+#collection only
+qiime feature-table summarize \
+  --i-table collection-only-filtered-table.qza \
+  --o-visualization collection-only-filtered-table.qzv \
+  --m-sample-metadata-file metadata.tsv
+
+#vitamin only without chloroplasts
+qiime feature-table summarize \
+  --i-table vitamins-only-filtered-table-no-chloro.qza \
+  --o-visualization vitamins-only-filtered-table-no-chloro.qzv \
+  --m-sample-metadata-file metadata.tsv
+
+##ALPHA AND BETA DIVERSITY analysis on the filtered table with vitamin data, chloroplast sequences included
+
+#p-max-depth is chosen based on the feature table obtained by denoising, as the 'interactive sample detail' tab shows how many sequences are retained at a certain sampling depth
+#the value of p-max-depth 23118 was chosen as it retains the highest number of sequences, while no samples are being excluded
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \
+  --i-table vitamins-only-filtered-table.qza \
+  --p-sampling-depth 23118 \
+  --m-metadata-file metadata.tsv \
+  --output-dir vit-only-w-chloro-core-metrics-results
+
+#testing whether alpha diversity metrics are significantly correlated to any metadata category, in this case vitamin treatment and growth stage (Kruskal-Wallis test)
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity vit-only-w-chloro-core-metrics-results/faith_pd_vector.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization vit-only-w-chloro-core-metrics-results/faith-pd-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity vit-only-w-chloro-core-metrics-results/evenness_vector.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization vit-only-w-chloro-core-metrics-results/evenness-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity vit-only-w-chloro-core-metrics-results/shannon_vector.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization vit-only-w-chloro-core-metrics-results/shannon-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity vit-only-w-chloro-core-metrics-results/observed_features_vector.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-w-chloro-core-metrics-results/observed-features-group-significance.qzv
+
+#testing whether beta diversity metrics are significantly correlated to any metadata category, in this case vitamin treatment (PERMANOVA test)
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-w-chloro-core-metrics-results/bray_curtis_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-w-chloro-core-metrics-results/bray-curtis-vitamins-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-w-chloro-core-metrics-results/jaccard_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-w-chloro-core-metrics-results/jaccard-vitamins-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-w-chloro-core-metrics-results/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-w-chloro-core-metrics-results/weighted-unifrac-vitamins-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-w-chloro-core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-w-chloro-core-metrics-results/unweighted-unifrac-vitamins-significance.qzv \
+  --p-pairwise
+
+#testing whether beta diversity metrics are significantly correlated to any metadata category, in this case growth stage (PERMANOVA test)
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-w-chloro-core-metrics-results/bray_curtis_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column GrowthStage \
+  --o-visualization vit-only-w-chloro-core-metrics-results/bray-curtis-stage-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-w-chloro-core-metrics-results/jaccard_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column GrowthStage \
+  --o-visualization vit-only-w-chloro-core-metrics-results/jaccard-stage-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-w-chloro-core-metrics-results/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column GrowthStage \
+  --o-visualization vit-only-w-chloro-core-metrics-results/weighted-unifrac-stage-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-w-chloro-core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column GrowthStage \
+  --o-visualization vit-only-w-chloro-core-metrics-results/unweighted-unifrac-stage-significance.qzv \
+  --p-pairwise
+
+#installing gemelli - a qiime2 plugin that enables creation of Robust Aitchison PCA biplots
+#the Robust Aitchison metric uses a log transformation of feature abundance data, thus better accounting for compositional data than regular beta diversity metrics
+#info and tutorials: https://github.com/biocore/gemelli
+pip install gemelli
+qiime dev refresh-cache
+qiime gemelli --help
+
+#generating the ordination and distance matrix for obtaining the RA-PCA plot
+#p-min-sample-count is set to 500 (as recommended by the plugin) - samples that have les than 500 features are excluded (there are no such samples in this analysis)
+#p-min-feature-count - features that have a total count less than 10 are excluded from the analysis 
+qiime gemelli rpca \
+    --i-table vitamins-only-filtered-table.qza \
+    --p-min-sample-count 500 \
+    --p-min-feature-count 10 \
+    --o-biplot vit-only-w-chloro-core-metrics-results/ordination.qza \
+    --o-distance-matrix vit-only-w-chloro-core-metrics-results/gemelli-distance.qza
+
+#rarefying the feature table to the same sampling depth and checking whether the impact of differences in sequencing depth or sample sum differences is influencing the sample distances or not
+#the sampling depth is chosen based on the 'interactive sample detail' tab in the vitamins-only-filtered-table.qza, so that the highest number of sequences is retained without losing any samples
+qiime feature-table rarefy \
+    --i-table vitamins-only-filtered-table.qza \
+    --p-sampling-depth 23118 \
+    --o-rarefied-table vit-only-w-chloro-core-metrics-results/rarefied-vitamins-only-filtered-table.qza
+
+#generating the ordination and distance matrix on the rarefied data
+qiime gemelli rpca \
+    --i-table vit-only-w-chloro-core-metrics-results/rarefied-vitamins-only-filtered-table.qza \
+    --o-biplot vit-only-w-chloro-core-metrics-results/rarefied-ordination.qza \
+    --o-distance-matrix vit-only-w-chloro-core-metrics-results/rarefied-gemelli-distance.qza
+
+#testing whether the sample distances are correlated with the sample sum differences
+qiime gemelli qc-rarefy \
+    --i-table vitamins-only-filtered-table.qza \
+    --i-rarefied-distance vit-only-w-chloro-core-metrics-results/rarefied-gemelli-distance.qza \
+    --i-unrarefied-distance vit-only-w-chloro-core-metrics-results/gemelli-distance.qza \
+    --o-visualization vit-only-w-chloro-core-metrics-results/rarefy-qc.qzv
+#the test statistic showed no significant difference in the correlation of rarefied distance vs unrarefied distance and absolute difference in sample sums ->  proceed with unrarefied data
+
+#creating the PCA biplot that shows which features (ASVs) most strongly influence the distribution of samples across the PC axes (default number of features shown is 5)
+qiime emperor biplot \
+    --i-biplot vit-only-w-chloro-core-metrics-results/ordination.qza \
+    --m-sample-metadata-file metadata.tsv \
+    --m-feature-metadata-file taxonomy-16s-sp-level.qza \
+    --o-visualization vit-only-w-chloro-core-metrics-results/robust-aitchison-biplot-vit-only.qzv 
+
+#testing whether robust aitchison distances are significantly correlated to the vitamin treatment (PERMANOVA test)
+qiime diversity beta-group-significance \
+    --i-distance-matrix vit-only-w-chloro-core-metrics-results/gemelli-distance.qza \
+    --m-metadata-file metadata.tsv \
+    --m-metadata-column Vitamins \
+    --o-visualization vit-only-w-chloro-core-metrics-results/robust-aitchison-vitamins-significance.qzv \
+    --p-pairwise
+
+#testing whether robust aitchison distances are significantly correlated to the growth stage (PERMANOVA test)
+qiime diversity beta-group-significance \
+    --i-distance-matrix vit-only-w-chloro-core-metrics-results/gemelli-distance.qza \
+    --m-metadata-file metadata.tsv \
+    --m-metadata-column GrowthStage \
+    --o-visualization vit-only-w-chloro-core-metrics-results/robust-aitchison-stage-significance.qzv \
+    --p-pairwise
+
+##ALPHA AND BETA DIVERSITY analysis on the filtered table with vitamin data, without chloroplast sequences
+
+#p-max-depth is chosen based on the feature table obtained by denoising, as the 'interactive sample detail' tab shows how many sequences are retained at a certain sampling depth
+#the value of p-max-depth 22077 was chosen as it retains the highest number of sequences, while no samples are being excluded
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \
+  --i-table vitamins-only-filtered-table-no-chloro.qza \
+  --p-sampling-depth 22077 \
+  --m-metadata-file metadata.tsv \
+  --output-dir vit-only-no-chloro-core-metrics-results
+
+#testing whether alpha diversity metrics are significantly correlated to any metadata category, in this case vitamin treatment and growth stage (Kruskal-Wallis test)
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity vit-only-no-chloro-core-metrics-results/faith_pd_vector.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization vit-only-no-chloro-core-metrics-results/faith-pd-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity vit-only-no-chloro-core-metrics-results/evenness_vector.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization vit-only-no-chloro-core-metrics-results/evenness-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity vit-only-no-chloro-core-metrics-results/shannon_vector.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization vit-only-no-chloro-core-metrics-results/shannon-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity vit-only-no-chloro-core-metrics-results/observed_features_vector.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization vit-only-no-chloro-core-metrics-results/observed-features-group-significance.qzv
+
+#testing whether beta diversity metrics are significantly correlated to any metadata category, in this case vitamin treatment (PERMANOVA test)
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-no-chloro-core-metrics-results/bray_curtis_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-no-chloro-core-metrics-results/bray-curtis-vitamins-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-no-chloro-core-metrics-results/jaccard_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-no-chloro-core-metrics-results/jaccard-vitamins-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-no-chloro-core-metrics-results/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-no-chloro-core-metrics-results/weighted-unifrac-vitamins-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-no-chloro-core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column Vitamins \
+  --o-visualization vit-only-no-chloro-core-metrics-results/unweighted-unifrac-vitamins-significance.qzv \
+  --p-pairwise
+
+#testing whether beta diversity metrics are significantly correlated to any metadata category, in this case growth stage (PERMANOVA test)
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-no-chloro-core-metrics-results/bray_curtis_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column GrowthStage \
+  --o-visualization vit-only-no-chloro-core-metrics-results/bray-curtis-stage-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-no-chloro-core-metrics-results/jaccard_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column GrowthStage \
+  --o-visualization vit-only-no-chloro-core-metrics-results/jaccard-stage-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-no-chloro-core-metrics-results/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column GrowthStage \
+  --o-visualization vit-only-no-chloro-core-metrics-results/weighted-unifrac-stage-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix vit-only-no-chloro-core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.tsv \
+  --m-metadata-column GrowthStage \
+  --o-visualization vit-only-no-chloro-core-metrics-results/unweighted-unifrac-stage-significance.qzv \
+  --p-pairwise
+
+#creating new taxa bar plot with only vitamin treatment samples, chloroplast included
+qiime taxa barplot \
+  --i-table vitamins-only-filtered-table.qza \
+  --i-taxonomy taxonomy-16s-sp-level.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization taxa-bar-plots-vit-only-16s-sp-level.qzv
+
+#creating new taxa bar plot with only vitamin treatment samples, without chloroplast 
+qiime taxa barplot \
+  --i-table vitamins-only-filtered-table-no-chloro.qza \
+  --i-taxonomy taxonomy-16s-sp-level.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization taxa-bar-plots-vit-only-16s-sp-level-no-chloro.qzv
+
+#generating the ordination and distance matrix for obtaining the RA-PCA plot, for only vitamin treatment samples, without chloroplast
+#p-min-sample-count is set to 500 (as recommended by the plugin) - samples that have les than 500 features are excluded (there are no such samples in this analysis)
+#p-min-feature-count - features that have a total count less than 10 are excluded from the analysis 
+qiime gemelli rpca \
+    --i-table vitamins-only-filtered-table-no-chloro.qza \
+    --p-min-sample-count 500 \
+    --p-min-feature-count 10 \
+    --o-biplot vit-only-no-chloro-core-metrics-results/ordination.qza \
+    --o-distance-matrix vit-only-no-chloro-core-metrics-results/gemelli-distance.qza
+
+#creating the PCA biplot that shows which features (ASVs) most strongly influence the distribution of samples across the PC axes (default number of features shown is 5)
+qiime emperor biplot \
+    --i-biplot vit-only-no-chloro-core-metrics-results/ordination.qza \
+    --m-sample-metadata-file metadata.tsv \
+    --m-feature-metadata-file taxonomy-16s-sp-level.qza \
+    --o-visualization vit-only-no-chloro-core-metrics-results/robust-aitchison-biplot-vit-only-no-chl.qzv 
+
+#testing whether robust aitchison distances are significantly correlated to the vitamin treatment (PERMANOVA test)
+qiime diversity beta-group-significance \
+    --i-distance-matrix vit-only-no-chloro-core-metrics-results/gemelli-distance.qza \
+    --m-metadata-file metadata.tsv \
+    --m-metadata-column Vitamins \
+    --o-visualization vit-only-no-chloro-core-metrics-results/robust-aitchison-vitamins-significance.qzv \
+    --p-pairwise
+
+#testing whether robust aitchison distances are significantly correlated to the growth stage (PERMANOVA test)
+qiime diversity beta-group-significance \
+    --i-distance-matrix vit-only-no-chloro-core-metrics-results/gemelli-distance.qza \
+    --m-metadata-file metadata.tsv \
+    --m-metadata-column GrowthStage \
+    --o-visualization vit-only-no-chloro-core-metrics-results/robust-aitchison-stage-significance.qzv \
+    --p-pairwise
+
+##June/2025##
+#filtering the table with all samples to exclude eukaryotic, unassigned and chloroplast sequences
+qiime taxa filter-table \
+  --i-table table-dada2-single-end-trimmed.qza \
+  --i-taxonomy taxonomy-16s-sp-level.qza \
+  --p-exclude Eukaryota,Unassigned,Chloroplast \
+  --o-filtered-table table-dada2-trimmed-no-euk-unassign-chl.qza
+
+#visualizing the new feature table
+qiime feature-table summarize \
+  --i-table table-dada2-trimmed-no-euk-unassign-chl.qza \
+  --o-visualization table-dada2-trimmed-no-euk-unassign-chl.qzv \
+  --m-sample-metadata-file metadata.tsv
+
+#creating a new taxa bar plot without Eukaryotic, Unassigned, or Chloroplast sequences
+qiime taxa barplot \
+  --i-table table-dada2-trimmed-no-euk-unassign-chl.qza \
+  --i-taxonomy taxonomy-16s-sp-level.qza \
+  --m-metadata-file metadata.tsv \
+  --o-visualization taxa-bar-plots-16s-no-euk-unassign-chl.qzv
