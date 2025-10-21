@@ -5,3 +5,4 @@ This repository is accompanying to the manuscript in preparation: **Frederic Cha
 
 It contains the scripts for analysis of data obtained by sequencing the V3-V4 region of 16S rDNA, obtained via Illumina MiSeq. The analysis was done in the QIIME2 platform (https://qiime2.org/), and taxonomic classifier training was done via the University of Zagreb's SRCE high-performance computing infrastructure.
 
+# Manuscript Abstract
